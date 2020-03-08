@@ -1,7 +1,7 @@
 ; iNES header data
 .segment "HEADER"
 	.byte "NES"
-	.byte $1a ; iNED header signature
+	.byte $1a ; iNES header signature
 	.byte $02 ; 2*16KB PRG ROM chips
 	.byte $01 ; 1*8KB CHR ROM chip
 	.byte $00 ; mapping/mirroring info
@@ -37,11 +37,9 @@ Reset:
 	; disable PCM channel to prevent weird sounds during startup
 	STX $4010
 
-; subroutine that loops until vblank occurs
-WAITFORVBLANK:
+:	; wait for a vblank
 	BIT $2002	; retrieve status bit from vblank register
-	BPL WAITFORVBLANK
-	RTS
+	BPL :-
 
 	TXA	; transfer the 0 from X to A - more efficient than LDA
 
@@ -61,8 +59,9 @@ MEMCLEAR:
 	INX	; X will overflow back to 0 when the loop is done
 	BNE MEMCLEAR
 
-	; wait again
-	JSR WAITFORVBLANK
+:	; wait on another vblank
+	BIT $2002	; retrieve status bit from vblank register
+	BPL :-
 
 	; copy graphics data into the PPU memory
 	LDA #$02	; most significant byte of graphics address
@@ -84,16 +83,9 @@ LoadPalettes:
 	CPX #$20
 	BNE LoadPalettes
 
-	; load sprite data into reserved $0200 => $02FF memory
-	LDX #$00
-LoadSprites:
-	LDA SpriteData, X
-	STA $0200, X
-	INX
-	CPX #$20
-	BNE LoadSprites
+	; load the character into entity memory below
 
-	; re-enable interrupts so we can begin game flow
+	; reenable interrupts
 	CLI
 
 	; initialize register $2000 to re-enable vblank and
@@ -105,32 +97,22 @@ LoadSprites:
 	LDA #%00011110
 	STA $2001
 
-INFINITE:	; halt startup code with an infinite loop
-	JMP INFINITE
+GameLoop:	; main game logic loop
+	JMP GameLoop
 
 VBLANK:
+	
 	; copy sprite data from memory into the PPU using
 	; memory-mapped $4014 PPU register
 	LDA #$02
 	STA $4014
 
-	RTI	; interrupy return
+	RTI	; interrupt return
 
 ; store palette data here
 PaletteData:
 	.byte $22,$29,$1A,$0F,$22,$36,$17,$0f,$22,$30,$21,$0f,$22,$27,$17,$0F  ;background palette data
 	.byte $22,$16,$27,$18,$22,$1A,$30,$27,$22,$16,$30,$27,$22,$0F,$36,$17  ;sprite palette data
-
-; store sprite data here
-SpriteData:
-	.byte $08, $00, $00, $08
-	.byte $08, $01, $00, $10
-	.byte $10, $12, $00, $08
-	.byte $10, $13, $00, $10
-	.byte $18, $14, $00, $08
-	.byte $18, $15, $00, $10
-	.byte $20, $16, $00, $08
-	.byte $20, $17, $00, $10
 
 ; put background nametable here
 
@@ -142,4 +124,4 @@ SpriteData:
 
 ; external graphics files
 .segment "CHARS"
-; include external .char graphics data here
+	.incbin "empty.chr"
