@@ -19,6 +19,7 @@
 .segment "ZEROPAGE"
 loptr:	.res 1	; reserve a 16-bit pointer
 hiptr:	.res 1
+input:	.res 1	; store input as a 1-byte bit vector
 
 ;------------------- Game code -------------------;
 .segment "STARTUP"
@@ -144,8 +145,24 @@ LoadAttributes:
 	LDA #%00011110
 	STA $2001
 
-;-------- Main logic loop for the game --------;
+;---------- Main logic loop for the game ----------;
 GameLoop:
+
+;--- Fetch input from register into byte vector ---;
+GetInput:
+	LDA #$01	; latch and strobe input register
+	STA $4016
+	LDA #$00
+	STA $4016
+	LDX #$08	; do some bit shifting to get inputs into zero page vector
+:
+	LDA $4016	; read in the next bit of the button vector
+	LSR A 		; move bit 0 out into the carry bit
+	ROL input	; move the carry bit into bit 0 of the Buttons label in the zero page
+	DEX
+	BNE :-
+
+	; Process the next frame
 	JMP GameLoop
 
 ;----- Vblank interrupt handles rendering -----;
