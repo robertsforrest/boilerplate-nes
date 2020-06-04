@@ -1,3 +1,6 @@
+; TODO:
+;	add attribute table loading to level loader
+
 ;-------- iNES header data for emulation --------;
 .segment "HEADER"
 	.byte "NES"
@@ -15,11 +18,22 @@
 ;----------- Data structures & scopes ------------;
 
 
+;-------------- Defines & constants --------------;
+OAM				= $0200
+LVL_METATILES 	= $F0
+METATILE_SIZE	= $04
+
 ;----- Zero page for efficient memory access -----;
 .segment "ZEROPAGE"
-loptr:	.res 1	; reserve a 16-bit pointer
-hiptr:	.res 1
-input:	.res 1	; store input as a 1-byte bit vector
+loptr:			.res 1	; reserve a 16-bit pointer
+hiptr:			.res 1
+input:			.res 1	; store input as a 1-byte bit vector
+data:			.res 1  ; general purpose data registers
+data2:			.res 1
+data3:			.res 1
+metatile_ptr:	.res 2	; 16-bit pointer to metatile data
+load_bg_buf:	.res 64 ; buffer for loading metatiles into PPU
+draw_finished:	.res 1  ; flag used to sync game loop w/ vblank
 
 ;------------------- Game code -------------------;
 .segment "STARTUP"
@@ -92,30 +106,12 @@ LoadPalettes:
 
 ;----- Load initial background data into PPU -----;
 LoadBackground:
-	LDA $2002	; reset PPU high/low latch with a read
-	LDA #$20
-	STA $2006	; write the high byte of $2000 address to mapped register $2006
-	LDA #$00
-	STA $2006	; write the low byte of $2000 to mapped register $2006
 	; prepare the background pointer
 	LDA #.LOBYTE(BackgroundData)
 	STA loptr
 	LDA #.HIBYTE(BackgroundData)
 	STA hiptr
-	; prepare loop counters
-	LDX #$00
-	LDY #$00
-@loop:
-	LDA (loptr), Y
-	STA $2007	; map out to PPU memory
-	INY
-	CPY #$00	; check if y counter has overflowed
-	BNE @loop
-	; now see if the x counter (hi byte) has hit is limit
-	INC hiptr
-	INX
-	CPX #$04
-	BNE @loop
+	JSR LoadLevel
 
 ;------ Load background attribute table -------;
 LoadAttributes:
@@ -132,6 +128,10 @@ LoadAttributes:
 	CPX #40		; 64 bytes of attribute table data
 	BNE :-
 
+;---------- Initialize zeropage data ---------;
+	LDA #$00
+	STA draw_finished
+
 ;-------------- Finishing setup --------------;
 	; reenable interrupts
 	CLI
@@ -147,6 +147,8 @@ LoadAttributes:
 
 ;---------- Main logic loop for the game ----------;
 GameLoop:
+	LDA #$00
+	STA draw_finished
 
 ;--- Fetch input from register into byte vector ---;
 GetInput:
@@ -163,26 +165,127 @@ GetInput:
 	BNE :-
 
 	; Process the next frame
+GameLogicDone:
+	LDA draw_finished
+	BEQ GameLogicDone
 	JMP GameLoop
+
+;----------------- Subroutines ----------------;
+; When calling LoadLevel, have pointer pre-loaded into loptr/hiptr
+LoadLevel:
+	LDA $2002	; reset PPU high/low latch with a read
+	LDA #$20
+	STA $2006	; write the high byte of $2000 address to mapped register $2006
+	LDA #$00
+	STA $2006	; write the low byte of $2000 to mapped register $2006
+	; prepare loop counters
+	LDA #$10
+	STA data2	; used for detecting end of y-indexed metatile row
+	LDX #$00
+	LDY #$00
+	; prepare metatile pointer
+	LDA #.LOBYTE(Metatiles)
+	STA metatile_ptr
+	LDA #.HIBYTE(Metatiles)
+	STA metatile_ptr+1
+MetatileLoop:
+	; metatile structure - index points to first of 4 consecutive tiles
+	; tiles are loaded at index, index+1, index+row_size, & index+row_size+1
+	LDA (loptr), Y
+	BNE :+
+	; on 0, store 0 in all 4 locations
+	STA load_bg_buf, X
+	STA load_bg_buf+1, X
+	STA load_bg_buf+32, X
+	STA load_bg_buf+33, X
+	JMP MetatileDone
+:
+	; fetch metatile address based on loaded index
+	;  address = Metatiles+(4*index)
+	STY data3	; save Y register
+	ASL
+	ASL	; shift left twice to multiply by 4
+	TAY ; place offset index to Y register
+	DEY
+	DEY
+	DEY
+	DEY
+	LDA (metatile_ptr), Y
+	STA load_bg_buf, X
+	INY
+	LDA (metatile_ptr), Y
+	STA load_bg_buf+1, X
+	INY
+	LDA (metatile_ptr), Y
+	STA load_bg_buf+32, X
+	INY
+	LDA (metatile_ptr), Y
+	STA load_bg_buf+33, X
+	LDY data3	; restore Y register
+MetatileDone:
+	INY
+	INX
+	INX
+	CPY data2
+	BNE MetatileLoop
+	; copy 32x2 metatile buffer into PPU background
+	LDA data2
+	CLC
+	ADC #$10
+	STA data2
+	STY data
+	LDY #$00
+CopyMTBuffer:
+	LDA load_bg_buf, Y
+	STA $2007
+	INY
+	CPY #$40
+	BNE CopyMTBuffer
+	LDX #$00
+	LDY data
+	CPY #LVL_METATILES
+	BNE MetatileLoop
+	RTS
 
 ;----- Vblank interrupt handles rendering -----;
 VBLANK:
+	; zero out PPUSCROLL
+	LDA #$00
+	STA $2006
+	STA $2006
+
+	; save registers
+	PHA	; push order - A, Y, X, P
+	TYA
+	PHA
+	TXA
+	PHA
+	PHP
 	
 	; copy sprite data from memory into the PPU using
 	; memory-mapped $4014 PPU register
 	LDA #$02
 	STA $4014
 
-	RTI	; interrupt return
+	; restore registers and return control
+	LDA #$01
+	STA draw_finished
+	PLP	; pull order - P, X, Y, A
+	PLA
+	TAX
+	PLA
+	TAY
+	PLA
+	RTI
 
 ;-------------- Binary game data --------------;
 PaletteData:
 	.byte $22,$29,$1A,$0F,$22,$36,$17,$0f,$22,$30,$21,$0f,$22,$27,$17,$0F  ;background palette data
 	.byte $22,$16,$27,$18,$22,$1A,$30,$27,$22,$16,$30,$27,$22,$0F,$36,$17  ;sprite palette data
-
+Metatiles:
+	.include "metatiles.asm"
 BackgroundData:
 	.incbin "background.bin"
-
 AttributeData:
 	.byte $00, $00, $00, $00, $00, $00, $00, $00
 	.byte $00, $00, $00, $00, $00, $00, $00, $00
@@ -200,4 +303,4 @@ AttributeData:
 	; specialized interrupt handler goes here
 
 .segment "CHARS"
-	.incbin "empty.chr"
+	.incbin "graphics.chr"
